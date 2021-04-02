@@ -3,3 +3,5 @@
 
 # Other
 cmd/vls/vls
+valgrind_test/open_close_doc
+valgrind-vls.txt

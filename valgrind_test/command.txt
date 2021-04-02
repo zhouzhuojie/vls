@@ -1,0 +1,1 @@
+valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --verbose --log-file=valgrind-vls.txt ./valgrind_test/open_close_doc
