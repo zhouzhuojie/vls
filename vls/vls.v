@@ -82,9 +82,11 @@ mut:
 	// tables  map[DocumentUri]&ast.Table
 	tables                   map[string]&ast.Table
 	root_uri                 lsp.DocumentUri
-	invalid_imports          map[string][]string // where it stores a list of invalid imports
+	// dir -> [][mod_name, import_dir_uri]
+	imports                  map[string][][]string
 	doc_symbols              map[string][]lsp.SymbolInformation // doc_symbols is used for caching document symbols
 	builtin_symbols          []string // list of publicly available symbols in builtin
+	// merge with lsp.doc_symbols
 	symbol_locations         map[string]map[string]lsp.Location
 	builtin_symbol_locations map[string]lsp.Location
 	enabled_features         []Feature = vls.default_features_list
@@ -370,12 +372,6 @@ fn (mut ls Vls) free_table(dir_path string, file_path string) {
 			ls.tables[dir_path].free()
 		}
 		ls.tables.delete(dir_path)
-	}
-	if file_path in ls.invalid_imports {
-		unsafe {
-			ls.invalid_imports[file_path].free()
-		}
-		ls.invalid_imports.delete(file_path)
 	}
 }
 

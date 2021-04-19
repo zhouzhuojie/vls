@@ -84,9 +84,9 @@ fn (mut ls Vls) document_symbol(id int, params string) {
 
 fn (mut ls Vls) generate_symbols(file ast.File, uri lsp.DocumentUri) []lsp.SymbolInformation {
 	mut symbols := []lsp.SymbolInformation{}
-	sym_is_cached := uri.str() in ls.doc_symbols
+	sym_is_cached := uri in ls.doc_symbols
 	if file.errors.len > 0 && sym_is_cached {
-		return ls.doc_symbols[uri.str()]
+		return ls.doc_symbols[uri]
 	}
 	dir := uri.dir()
 	// NB: should never happen. just in case
@@ -155,7 +155,7 @@ fn (mut ls Vls) generate_symbols(file ast.File, uri lsp.DocumentUri) []lsp.Symbo
 			}
 		}
 	}
-	ls.doc_symbols[uri.str()] = symbols
+	ls.doc_symbols[uri] << symbols
 	return symbols
 }
 
@@ -804,8 +804,7 @@ fn (mut ls Vls) completion(id int, params string) {
 		// Imported modules. They will be shown to the user if there is no given
 		// type for filtering the results. Invalid imports are excluded.
 		for imp in file.imports {
-			if imp.syms.len == 0 && (cfg.filter_type == ast.Type(0)
-				|| imp.mod !in ls.invalid_imports[file_uri.str()]) {
+			if imp.syms.len == 0 && (cfg.filter_type == ast.Type(0) && imp.mod in ls.imports[file_uri.dir()].map(it[0])) {
 				completion_items << lsp.CompletionItem{
 					label: imp.alias
 					kind: .module_

@@ -73,106 +73,217 @@ fn (mut ls Vls) process_file(source string, uri lsp.DocumentUri) {
 	if uri.ends_with('_test.v') {
 		pref.is_test = true
 	}
+
 	ls.free_table(target_dir_uri, file_path)
-	table := ls.new_table()
+	ls.tables[target_dir_uri] = ls.new_table()
+
 	mut parsed_files := []ast.File{}
-	mut checker := checker.new_checker(table, pref)
-	mod_dir := os.dir(file_path)
-	cur_mod_files := os.ls(mod_dir) or { [] }
-	other_files := pref.should_compile_filtered_files(mod_dir, cur_mod_files).filter(it != file_path)
-	parsed_files << parser.parse_files(other_files, table, pref, scope)
-	parsed_files << parser.parse_text(source, file_path, table, .skip_comments, pref,
+	mut checker := checker.new_checker(ls.tables[target_dir_uri], pref)
+
+	if target_dir_uri in ls.file_names {
+		cur_mod_files := ls.file_names[target_dir_uri].filter(it != uri)
+		parsed_files << cur_mod_files.map(ls.files[it])
+	} else {
+		cur_mod_files := os.ls(target_dir) or { [] }
+		other_files := pref.should_compile_filtered_files(target_dir, cur_mod_files).filter(it != file_path)
+		parsed_files << parser.parse_files(other_files, ls.tables[target_dir_uri], pref, scope)
+	}
+	
+	parsed_files << parser.parse_text(source, file_path, ls.tables[target_dir_uri], .skip_comments, pref,
 		scope)
-	imported_files, import_errors := ls.parse_imports(parsed_files, table, pref, scope)
+
+	import_errors := ls.parse_imports(parsed_files, mut ls.tables[target_dir_uri], pref, scope)
 	checker.check_files(parsed_files)
-	ls.tables[target_dir_uri] = table
 	ls.insert_files(parsed_files)
 	for err in import_errors {
-		err_file_uri := lsp.document_uri_from_path(err.file_path).str()
+		err_file_uri := lsp.document_uri_from_path(err.file_path)
 		ls.files[err_file_uri].errors << err
 		unsafe { err_file_uri.free() }
 	}
+
 	ls.show_diagnostics(uri)
 	unsafe {
-		imported_files.free()
 		import_errors.free()
 		parsed_files.free()
 		source.free()
 	}
 }
 
+[manualfree]
+fn get_import_dir_and_files(mod string, prefs &pref.Preferences) ?(string, []string) {
+	for path in prefs.lookup_path {
+		mod_dir := os.join_path(path, mod.split('.').join(os.path_separator))
+
+		// if directory does not exist, proceed to another lookup path
+		if !os.exists(mod_dir) {
+			continue
+		}
+		
+		mut files := os.ls(mod_dir) or { 
+			// break loop if files is empty
+			break
+		}
+
+		filtered_files := prefs.should_compile_filtered_files(mod_dir, files)
+		unsafe { files.free() }
+
+		// return error if given directory is empty
+		if filtered_files.len == 0 {
+			unsafe { filtered_files.free() }
+			return error('module `$mod` is empty')
+		}
+		
+		return mod_dir, filtered_files
+	}
+
+	return error('cannot find module `$mod`')
+}
+
+fn (ls Vls) mod_already_imported(dir_uri lsp.DocumentUri, mod string) bool {
+	done_imports := ls.imports[dir_uri] or { return false }
+	for imp in done_imports {
+		if imp[0] == mod {
+			return true
+		}
+	}
+
+	return false
+}
+
 // NOTE: once builder.find_module_path is extracted, simplify parse_imports
 [manualfree]
-fn (mut ls Vls) parse_imports(parsed_files []ast.File, table &ast.Table, pref &pref.Preferences, scope &ast.Scope) ([]ast.File, []errors.Error) {
-	mut newly_parsed_files := []ast.File{}
+fn (mut ls Vls) parse_imports(parsed_files []ast.File, mut table ast.Table, prefs &pref.Preferences, scope &ast.Scope) []errors.Error {
+	// mut newly_parsed_files := []ast.File{}
 	mut errs := []errors.Error{}
 	mut done_imports := parsed_files.map(it.mod.name)
+	mut done_imports2 := []string{}
 	// NB: b.parsed_files is appended in the loop,
 	// so we can not use the shorter `for in` form.
-	for i := 0; i < parsed_files.len; i++ {
-		file := parsed_files[i]
-		file_uri := lsp.document_uri_from_path(file.path).str()
-		if file_uri in ls.invalid_imports {
-			unsafe { ls.invalid_imports[file_uri].free() }
-		}
-		mut invalid_imports := []string{}
+	for file in parsed_files {
+		file_uri := lsp.document_uri_from_path(file.path)
+		
 		for _, imp in file.imports {
-			if imp.mod in done_imports {
+			// skip if mod is already imported
+			if ls.mod_already_imported(file_uri.dir(), imp.mod) {
 				continue
 			}
-			mut found := false
-			mut import_err_msg := "cannot find module '$imp.mod'"
-			for path in pref.lookup_path {
-				mod_dir := os.join_path(path, imp.mod.split('.').join(os.path_separator))
-				if !os.exists(mod_dir) {
-					continue
-				}
-				mut files := os.ls(mod_dir) or { []string{} }
-				files = pref.should_compile_filtered_files(mod_dir, files)
-				if files.len == 0 {
-					import_err_msg = "module '$imp.mod' is empty"
-					break
-				}
-				found = true
-				mut tmp_new_parsed_files := parser.parse_files(files, table, pref, scope)
-				tmp_new_parsed_files = tmp_new_parsed_files.filter(it.mod.name !in done_imports)
-				mut clean_new_files_names := []string{}
-				for index, new_file in tmp_new_parsed_files {
-					if new_file.mod.name !in clean_new_files_names {
-						newly_parsed_files << tmp_new_parsed_files[index]
-						clean_new_files_names << new_file.mod.name
-					}
-				}
-				newly_parsed_files2, errs2 := ls.parse_imports(newly_parsed_files, table,
-					pref, scope)
-				errs << errs2
-				newly_parsed_files << newly_parsed_files2
-				done_imports << imp.mod
-				unsafe {
-					newly_parsed_files2.free()
-					errs2.free()
-				}
-				break
-			}
-			if !found {
+
+			imp_mod_dir, files := get_import_dir_and_files(imp.mod, prefs) or {
 				errs << errors.Error{
-					message: import_err_msg
+					message: err.msg
 					file_path: file.path
 					pos: imp.pos
 					reporter: .checker
 				}
-				if imp.mod !in invalid_imports {
-					invalid_imports << imp.mod
-				}
 				continue
 			}
+
+			imp_mod_dir_uri := lsp.document_uri_from_path(imp_mod_dir)
+			if imp_mod_dir_uri !in ls.tables {
+				ls.log_message('Module `${imp.mod}` is not yet present. Importing...', .info)
+				ls.tables[imp_mod_dir_uri] = ls.new_table()
+
+				mut tmp_new_parsed_files := parser.parse_files(files, ls.tables[imp_mod_dir_uri], prefs, scope)
+				mut clean_new_file_names := []string{}
+				for i := 0; i < tmp_new_parsed_files.len; {
+					if tmp_new_parsed_files[i].mod.name !in done_imports {
+						if tmp_new_parsed_files[i].mod.name !in clean_new_file_names {
+							clean_new_file_names << tmp_new_parsed_files[i].mod.name
+						}
+
+						i++
+						continue
+					}
+
+					unsafe { tmp_new_parsed_files[i].free() }
+					tmp_new_parsed_files.delete(i)
+				}
+
+				// ignore errors
+				ls.parse_imports(tmp_new_parsed_files, mut ls.tables[imp_mod_dir_uri], prefs, scope)
+				
+				// mark as done
+				ls.imports[file_uri.dir()] << [imp.mod, imp_mod_dir_uri]
+
+				if imp_mod_dir_uri !in ls.symbol_locations {
+					for ifile in tmp_new_parsed_files {
+						ls.extract_symbol_locations(lsp.document_uri_from_path(ifile.path), ifile.mod.name, ifile.stmts)
+					}
+				}
+
+				unsafe {
+					files.free()
+					clean_new_file_names.free()
+					for j := 0; j < tmp_new_parsed_files.len; j++ {
+						tmp_new_parsed_files[j].free()
+					}
+					tmp_new_parsed_files.free()
+				}
+			} 
+			
+			if imp.mod !in done_imports2 {
+				ls.log_message('Module `${imp.mod}` already imported. copying it to ${file_uri.dir()}\'s table...', .info)
+
+				// copy existing table data to the parent table
+				// primitive implementation
+				for _, type_sym_idx in ls.tables[imp_mod_dir_uri].type_idxs {
+					table.register_type_symbol(ls.tables[imp_mod_dir_uri].type_symbols[type_sym_idx])
+				}
+
+				for _, fnd in ls.tables[imp_mod_dir_uri].fns {
+					table.register_fn(fnd)
+				}
+
+				// TODO:
+				// for fn_g_types 
+
+				// Register
+				done_imports2 << imp.mod
+			}
 		}
-		ls.invalid_imports[file_uri] = invalid_imports.clone()
-		unsafe {
-			invalid_imports.free()
-			file_uri.free()
-		}
+
+		unsafe { file_uri.free() }
 	}
-	unsafe { done_imports.free() }
-	return newly_parsed_files, errs
+
+	// remove imports
+	dir_uri := lsp.document_uri_from_path(parsed_files[0].path).dir()
+	for imp in ls.imports[dir_uri] {
+		imp_uri := imp[1]
+		mut has_files := false
+		for file_uri, _ in ls.files {
+			if lsp.DocumentUri(file_uri).dir() == imp_uri {
+				ls.log_message('$imp_uri has files. Skip deletion.', .info)
+				has_files = true
+				break
+			}
+		}
+
+		if !has_files {
+			unsafe {
+				ls.tables[imp_uri].free()
+				ls.tables.delete(imp_uri)
+
+				if imp_uri in ls.imports {
+					for dep in ls.imports[imp_uri] {
+						dep.free()
+					}
+
+					ls.imports[imp_uri].free()
+					ls.imports.delete(imp_uri)
+				}
+			}		
+		}
+
+	}
+	ls.log_message(ls.imports.str(), .info)
+
+	unsafe { 
+		done_imports.free()
+		done_imports2.free()
+		// for file in newly_parsed_files {
+		// 	file.free()
+		// }
+		// newly_parsed_files.free()
+	}
+	return errs
 }

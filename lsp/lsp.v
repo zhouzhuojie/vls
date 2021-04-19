@@ -4,7 +4,7 @@ import os
 
 type DocumentUri = string
 
-pub fn (du DocumentUri) dir() string {
+pub fn (du DocumentUri) dir() DocumentUri {
 	return os.dir(du)
 }
 
