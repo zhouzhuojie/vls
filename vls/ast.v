@@ -14,11 +14,12 @@ pub fn find_ast_by_pos(nodes []ast.Node, offset int) ?ast.Node {
 	mut data := FindNodeByPos{
 		pos: offset
 	}
-	for node in nodes {
+	for i in 0 .. nodes.len {
+		node := unsafe { &nodes[i] }
 		if data.found {
 			return data.node
 		}
-		walker.inspect(node, data, fn (node ast.Node, mut data FindNodeByPos) bool {
+		walker.inspect(node, data, fn (node &ast.Node, mut data FindNodeByPos) bool {
 			node_pos := node.position()
 			if is_within_pos(data.pos, node_pos) {
 				data.node = node
